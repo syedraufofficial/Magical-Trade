@@ -210,6 +210,97 @@ if st.session_state.angel is not None:
 
 else:
     st.info("Connect Angel One to fetch historical candles.")
+
+# ==========================================
+# NIFTY 50 UNIVERSE AND STOCK OPTIONS
+# ==========================================
+
+st.divider()
+st.header("NIFTY 50 Stocks & Stock Options")
+
+st.caption(
+    "Constituent and contract data from NSE and Angel One's "
+    "instrument master. This section does not place orders."
+)
+
+
+@st.cache_data(ttl=3600)
+def get_nifty50_data():
+    return load_nifty50_symbols()
+
+
+@st.cache_data(ttl=3600)
+def get_instrument_data():
+    return load_instrument_master()
+
+
+if st.button("Load NIFTY 50 Stocks & Options"):
+    try:
+        with st.spinner("Loading NIFTY 50 constituents..."):
+            nifty50_symbols = get_nifty50_data()
+
+        with st.spinner("Loading Angel One instrument master..."):
+            instrument_records = get_instrument_data()
+
+        stock_options = filter_nifty50_stock_options(
+            instrument_records,
+            nifty50_symbols,
+        )
+
+        st.session_state.nifty50_symbols = nifty50_symbols
+        st.session_state.nifty50_stock_options = stock_options
+
+        st.success("NIFTY 50 data loaded successfully.")
+
+    except Exception as exc:
+        st.error(f"Data loading failed: {exc}")
+
+
+if "nifty50_symbols" in st.session_state:
+    symbols = st.session_state.nifty50_symbols
+    options = st.session_state.nifty50_stock_options
+
+    col1, col2 = st.columns(2)
+    col1.metric("NIFTY 50 Constituents", len(symbols))
+    col2.metric("Stock Option Contracts", len(options))
+
+    st.subheader("NIFTY 50 Constituents")
+    st.write(", ".join(symbols))
+
+    if options:
+        available_stocks = sorted({
+            item["name"] for item in options
+        })
+
+        selected_stock = st.selectbox(
+            "Select NIFTY 50 stock",
+            available_stocks,
+        )
+
+        selected_options = [
+            {
+                "Trading Symbol": item["symbol"],
+                "Expiry": item["expiry"],
+                "Option Type": (
+                    "CE" if item["symbol"].endswith("CE")
+                    else "PE"
+                ),
+                "Token": item["token"],
+                "Lot Size": item["lotsize"],
+            }
+            for item in options
+            if item["name"] == selected_stock
+        ]
+
+        st.subheader(f"{selected_stock} Option Contracts")
+        st.dataframe(
+            selected_options,
+            use_container_width=True,
+        )
+    else:
+        st.warning("No matching NIFTY 50 stock options found.")
+
+
 # ==========================================
 # PAPER TRADING / DEMO DASHBOARD
 # ==========================================
