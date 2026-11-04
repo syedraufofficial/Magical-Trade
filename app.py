@@ -292,8 +292,8 @@ if "nifty50_symbols" in st.session_state:
             if item["name"] == selected_stock
         ]
 
-        st.subheader(f"{selected_stock} Option Contracts")
-st.table(selected_options)
+        st.table(selected_options)
+       
 
         st.subheader("Live Option Price")
 
