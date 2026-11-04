@@ -87,3 +87,27 @@ def filter_nifty50_stock_options(records, nifty50_symbols):
             item.get("symbol", ""),
         ),
     )
+def find_instrument(records, exchange, trading_symbol):
+    """Find one exact instrument; keep its token internal."""
+
+    exchange = str(exchange).strip().upper()
+    trading_symbol = str(trading_symbol).strip().upper()
+
+    matches = [
+        item
+        for item in records
+        if str(item.get("exch_seg", "")).upper() == exchange
+        and str(item.get("symbol", "")).upper() == trading_symbol
+    ]
+
+    if not matches:
+        raise ValueError(
+            f"Instrument not found: {exchange} {trading_symbol}"
+        )
+
+    if len(matches) > 1:
+        raise ValueError(
+            f"Instrument lookup is ambiguous: {exchange} {trading_symbol}"
+        )
+
+    return matches[0]
