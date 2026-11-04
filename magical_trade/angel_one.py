@@ -1,8 +1,6 @@
 
 """Read-only Angel One SmartAPI adapter with diagnostics."""
 
-
-
 import os
 import logging
 from datetime import datetime
@@ -11,6 +9,7 @@ from magical_trade.market_data import (
     parse_smartapi_quote,
     parse_smartapi_candles,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -263,11 +262,6 @@ class AngelOneAdapter:
                 "Start date must be earlier than end date."
             )
 
-        if end - start > timedelta(days=intervals[interval]):
-            raise ValueError(
-                "Requested date range exceeds the Angel One "
-                "limit for this interval."
-            )
 
         params = {
             "exchange": exchange,
