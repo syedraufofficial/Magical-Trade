@@ -1,43 +1,214 @@
+
 import streamlit as st
+
 from magical_trade.config import Settings
 from magical_trade.models import MarketSnapshot
 from magical_trade.decision import evaluate
 from magical_trade.paper import PaperBroker
+from magical_trade.angel_one import AngelOneAdapter
+
 
 st.set_page_config(page_title="Magical Trade", layout="wide")
+
 st.title("🪄 Magical Trade")
-st.caption("Indian options research dashboard · Paper trading only · Live execution disabled")
+st.caption(
+    "Indian options research dashboard · Paper trading · "
+    "Angel One market data · Real execution disabled"
+)
+
 settings = Settings.from_env()
+
 if "paper" not in st.session_state:
     st.session_state.paper = PaperBroker(settings.paper_initial_capital)
 
-st.subheader("Market snapshot (manual/demo input)")
+if "angel" not in st.session_state:
+    st.session_state.angel = None
+
+if "angel_quote" not in st.session_state:
+    st.session_state.angel_quote = None
+
+
+# ==========================================
+# ANGEL ONE CONNECTION - READ ONLY
+# ==========================================
+
+st.header("Angel One connection")
+
+st.info(
+    "Read-only market data connection. "
+    "This app cannot place, modify or cancel broker orders."
+)
+
+if st.button("Connect Angel One", type="primary"):
+    try:
+        required = [
+            "ANGEL_API_KEY",
+            "ANGEL_CLIENT_CODE",
+            "ANGEL_PIN",
+            "ANGEL_TOTP_SECRET",
+        ]
+
+        credentials = {
+            key: st.secrets[key]
+            for key in required
+            if key in st.secrets
+        }
+
+        if len(credentials) != len(required):
+            st.error(
+                "Angel One credentials are incomplete. "
+                "Configure all four values in Streamlit Secrets."
+            )
+        else:
+            adapter = AngelOneAdapter(credentials)
+            adapter.connect()
+            st.session_state.angel = adapter
+            st.session_state.angel_quote = None
+            st.success("Angel One authenticated successfully.")
+
+    except Exception as exc:
+        st.session_state.angel = None
+        st.error(f"Connection failed: {exc}")
+
+
+if st.session_state.angel is not None:
+    st.success("Angel One connected")
+
+    st.subheader("Live market quote")
+
+    exchange = st.selectbox(
+        "Exchange",
+        ["NSE", "BSE", "NFO", "BFO"],
+        index=0,
+    )
+
+    symbol = st.text_input("Trading symbol", "NIFTY")
+    token = st.text_input("Angel One symbol token", "99926000")
+
+    if st.button("Fetch live quote"):
+        try:
+            quote = st.session_state.angel.get_ltp_quote(
+                exchange,
+                symbol.strip(),
+                token.strip(),
+            )
+            st.session_state.angel_quote = quote
+            st.success("Quote received from Angel One.")
+
+        except Exception as exc:
+            st.session_state.angel_quote = None
+            st.error(f"Quote request failed: {exc}")
+
+    quote = st.session_state.angel_quote
+
+    if quote is not None:
+        st.metric("Live LTP", f"₹{quote.ltp:,.2f}")
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Open", f"₹{quote.open:,.2f}")
+        col2.metric("High", f"₹{quote.high:,.2f}")
+        col3.metric("Low", f"₹{quote.low:,.2f}")
+
+        st.write("Symbol:", quote.symbol)
+        st.write("Token:", quote.token)
+        st.write("Volume:", quote.volume)
+        st.write("Exchange time:", quote.exchange_time or "Not supplied")
+
+        st.caption(
+            "This is a broker quote, not a buy/sell recommendation."
+        )
+
+
+# ==========================================
+# PAPER TRADING / DEMO DASHBOARD
+# ==========================================
+
+st.divider()
+st.header("Market snapshot (manual/demo input)")
+
 with st.form("snapshot"):
     c1, c2, c3 = st.columns(3)
+
     symbol = c1.text_input("Instrument", "NIFTY")
     ltp = c1.number_input("LTP", min_value=0.0, value=100.0)
+
     bid = c2.number_input("Bid", min_value=0.0, value=99.9)
     ask = c2.number_input("Ask", min_value=0.0, value=100.1)
+
     vwap = c3.number_input("VWAP", min_value=0.0, value=99.0)
     fast = c3.number_input("Fast SMA", min_value=0.0, value=100.0)
     slow = c3.number_input("Slow SMA", min_value=0.0, value=98.0)
+
     volume = c1.number_input("Volume ratio", min_value=0.0, value=1.6)
     oi = c2.number_input("OI change %", value=2.5)
-    vol = c3.number_input("Volatility % (optional)", min_value=0.0, value=1.0)
-    submitted = st.form_submit_button("Evaluate snapshot")
+    vol = c3.number_input(
+        "Volatility % (optional)",
+        min_value=0.0,
+        value=1.0,
+    )
+
+    submitted = st.form_submit_button("Evaluate demo snapshot")
+
 if submitted:
-    snap = MarketSnapshot(symbol, ltp, bid, ask, vwap, fast, slow, oi, volume, vol)
-    signal, message = evaluate(snap, settings.min_confidence, settings.min_risk_reward, settings.max_spread_pct)
+    snap = MarketSnapshot(
+        symbol,
+        ltp,
+        bid,
+        ask,
+        vwap,
+        fast,
+        slow,
+        oi,
+        volume,
+        vol,
+    )
+
+    signal, message = evaluate(
+        snap,
+        settings.min_confidence,
+        settings.min_risk_reward,
+        settings.max_spread_pct,
+    )
+
     st.session_state.signal = signal
     st.info(message)
+
     if signal:
-        st.success(f"{signal.side.value} {signal.symbol} · Confidence {signal.confidence:.1f}%")
-        st.write({"entry": signal.entry, "stop_loss": signal.stop_loss, "target": signal.target,
-                  "rationale": signal.rationale})
+        st.success(
+            f"DEMO SIGNAL: {signal.side.value} {signal.symbol} "
+            f"· Confidence {signal.confidence:.1f}%"
+        )
+
+        st.write({
+            "entry": signal.entry,
+            "stop_loss": signal.stop_loss,
+            "target": signal.target,
+            "rationale": signal.rationale,
+        })
+
+
+# ==========================================
+# PAPER ACCOUNT
+# ==========================================
 
 st.divider()
-st.subheader("Paper account")
-st.metric("Paper cash", f"₹{st.session_state.paper.cash:,.2f}")
-st.caption("This starter UI does not fetch live prices or submit broker orders.")
-st.subheader("Execution safety")
-st.error("REAL TRADING DISABLED. No live order can be sent by this build.")
+st.header("Paper account")
+
+st.metric(
+    "Paper cash",
+    f"₹{st.session_state.paper.cash:,.2f}",
+)
+
+st.caption(
+    "Paper account only. Live broker orders are not enabled."
+)
+
+# ==========================================
+# EXECUTION SAFETY
+# ==========================================
+
+st.header("Execution safety")
+
+st.error(
+    "REAL TRADING DISABLED. No live order can be sent by this build."
+)
