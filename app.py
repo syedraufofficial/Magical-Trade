@@ -293,10 +293,8 @@ if "nifty50_symbols" in st.session_state:
         ]
 
         st.subheader(f"{selected_stock} Option Contracts")
-        st.dataframe(
-            selected_options,
-            use_container_width=True,
-        )
+st.table(selected_options)
+
         st.subheader("Live Option Price")
 
         contract_map = {
