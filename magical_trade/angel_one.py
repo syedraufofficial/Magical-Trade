@@ -1,5 +1,5 @@
 
-"""Read-only Angel One SmartAPI adapter."""
+"""Read-only Angel One SmartAPI adapter with safe diagnostics."""
 
 import os
 
@@ -15,14 +15,37 @@ class AngelOneAdapter:
     def _credential(self, name):
         return self.credentials.get(name) or os.getenv(name)
 
+    def _safe_error(self, exc, totp=None):
+        message = str(exc) or "No additional details."
+        secrets = [
+            self._credential("ANGEL_API_KEY"),
+            self._credential("ANGEL_CLIENT_CODE"),
+            self._credential("ANGEL_PIN"),
+            self._credential("ANGEL_TOTP_SECRET"),
+            totp,
+        ]
+
+        for secret in secrets:
+            if secret:
+                message = message.replace(str(secret), "[REDACTED]")
+
+        return f"{type(exc).__name__}: {message[:400]}"
+
     def connect(self):
+        self.connected = False
+        self.client = None
+
         api_key = self._credential("ANGEL_API_KEY")
         client_code = self._credential("ANGEL_CLIENT_CODE")
         pin = self._credential("ANGEL_PIN")
         totp_secret = self._credential("ANGEL_TOTP_SECRET")
 
         if not all([api_key, client_code, pin, totp_secret]):
-            raise RuntimeError("Angel One credentials are missing from Streamlit Secrets.")
+            raise RuntimeError(
+                "Missing Angel One credentials in Streamlit Secrets."
+            )
+
+        totp = None
 
         try:
             import pyotp
@@ -31,24 +54,35 @@ class AngelOneAdapter:
             client = SmartConnect(api_key=api_key)
             totp = pyotp.TOTP(totp_secret).now()
 
-            response = client.generateSession(client_code, pin, totp)
+            response = client.generateSession(
+                client_code, pin, totp
+            )
 
-            if not isinstance(response, dict) or response.get("status") is not True:
-                raise RuntimeError("Angel One authentication failed.")
+            if not isinstance(response, dict):
+                raise RuntimeError(
+                    "Unexpected Angel One login response."
+                )
+
+            if response.get("status") is not True:
+                code = response.get("errorcode", "")
+                detail = response.get("message", "Login rejected")
+
+                raise RuntimeError(
+                    f"Angel One rejected login. "
+                    f"Code: {code}. Details: {detail}"
+                )
 
             self.client = client
             self.connected = True
             return True
 
-        except RuntimeError:
+        except Exception as exc:
             self.client = None
             self.connected = False
-            raise
-        except Exception:
-            self.client = None
-            self.connected = False
+
             raise RuntimeError(
-                "Angel One connection failed. Check credentials and SDK setup."
+                "Angel One connection failed: "
+                + self._safe_error(exc, totp)
             ) from None
 
     def get_ltp_quote(self, exchange, symbol, token):
@@ -56,15 +90,28 @@ class AngelOneAdapter:
             raise RuntimeError("Connect to Angel One first.")
 
         if not all([exchange, symbol, token]):
-            raise ValueError("Exchange, symbol and token are required.")
+            raise ValueError(
+                "Exchange, symbol and token are required."
+            )
 
         try:
-            response = self.client.ltpData(exchange, symbol, str(token))
+            response = self.client.ltpData(
+                exchange, symbol, str(token)
+            )
 
-            if not isinstance(response, dict) or response.get("status") is not True:
-                raise RuntimeError("Angel One quote request failed.")
+            if (
+                not isinstance(response, dict)
+                or response.get("status") is not True
+            ):
+                detail = (
+                    response.get("message", "Quote rejected")
+                    if isinstance(response, dict)
+                    else "Invalid response"
+                )
+                raise RuntimeError(detail)
 
             quote_data = response.get("data")
+
             if not isinstance(quote_data, dict):
                 raise RuntimeError("Invalid quote response.")
 
@@ -75,8 +122,11 @@ class AngelOneAdapter:
 
         except (ValueError, RuntimeError):
             raise
-        except Exception:
-            raise RuntimeError("Unable to fetch Angel One quote.") from None
+
+        except Exception as exc:
+            raise RuntimeError(
+                "Quote error: " + self._safe_error(exc)
+            ) from None
 
     def get_market_snapshot(self, symbol, exchange, token):
         return self.get_ltp_quote(exchange, symbol, token)
