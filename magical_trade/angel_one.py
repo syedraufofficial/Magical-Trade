@@ -209,6 +209,115 @@ class AngelOneAdapter:
                 + self._safe_error(exc)
             ) from None
 
+
+
+    # ======================================
+    # HISTORICAL CANDLE DATA
+    # ======================================
+
+    def get_historical_candles(
+        self,
+        exchange,
+        token,
+        fromdate,
+        todate,
+        interval="FIVE_MINUTE",
+    ):
+
+        if not self.connected or self.client is None:
+            raise RuntimeError("Connect to Angel One first.")
+
+        intervals = {
+            "ONE_MINUTE": 30,
+            "THREE_MINUTE": 60,
+            "FIVE_MINUTE": 100,
+            "TEN_MINUTE": 100,
+            "FIFTEEN_MINUTE": 200,
+            "THIRTY_MINUTE": 200,
+            "ONE_HOUR": 400,
+            "ONE_DAY": 2000,
+        }
+
+        exchange = str(exchange).upper()
+        interval = str(interval).upper()
+
+        if exchange not in {"NSE", "NFO", "BSE", "BFO", "MCX"}:
+            raise ValueError("Unsupported exchange.")
+
+        if interval not in intervals:
+            raise ValueError("Unsupported candle interval.")
+
+        if not token:
+            raise ValueError("Instrument token is required.")
+
+        try:
+            start = datetime.strptime(
+                fromdate, "%Y-%m-%d %H:%M"
+            )
+            end = datetime.strptime(
+                todate, "%Y-%m-%d %H:%M"
+            )
+
+        except (TypeError, ValueError):
+            raise ValueError(
+                "Dates must use YYYY-MM-DD HH:MM format."
+            ) from None
+
+        if start >= end:
+            raise ValueError(
+                "Start date must be earlier than end date."
+            )
+
+        if end - start > timedelta(days=intervals[interval]):
+            raise ValueError(
+                "Requested date range exceeds the Angel One "
+                "limit for this interval."
+            )
+
+        params = {
+            "exchange": exchange,
+            "symboltoken": str(token),
+            "interval": interval,
+            "fromdate": start.strftime("%Y-%m-%d %H:%M"),
+            "todate": end.strftime("%Y-%m-%d %H:%M"),
+        }
+
+        try:
+            response = self.client.getCandleData(params)
+
+            if not isinstance(response, dict):
+                raise RuntimeError(
+                    "Invalid historical API response."
+                )
+
+            if response.get("status") is not True:
+                raise RuntimeError(
+                    "Historical API rejected request: "
+                    + str(response.get("message", "Unknown error"))
+                )
+
+            candles = parse_smartapi_candles(response)
+
+            logger.info(
+                "Historical candles received: %s | %s",
+                interval,
+                len(candles),
+            )
+
+            if not candles:
+                logger.warning("No historical candles returned.")
+
+            return candles
+
+        except (ValueError, RuntimeError):
+            raise
+
+        except Exception as exc:
+            raise RuntimeError(
+                "Historical data error: "
+                + self._safe_error(exc)
+            ) from None
+
     # ======================================
     # MARKET SNAPSHOT
     # ======================================
