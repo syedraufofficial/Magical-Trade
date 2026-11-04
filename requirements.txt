@@ -6,3 +6,4 @@ pyotp
 logzero
 websocket-client
 pycryptodome
+requests>=2.31,<3
