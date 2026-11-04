@@ -297,6 +297,46 @@ if "nifty50_symbols" in st.session_state:
             selected_options,
             use_container_width=True,
         )
+        st.subheader("Live Option Price")
+
+        contract_map = {
+            item["symbol"]: item
+            for item in options
+            if item["name"] == selected_stock
+        }
+
+        selected_contract_symbol = st.selectbox(
+            "Select option contract for live price",
+            sorted(contract_map.keys()),
+        )
+
+        selected_contract = contract_map[
+            selected_contract_symbol
+        ]
+
+        if st.button("Fetch Live Option LTP"):
+            if st.session_state.angel is None:
+                st.warning("Connect Angel One first.")
+            else:
+                try:
+                    quote = st.session_state.angel.get_ltp_quote(
+                        "NFO",
+                        selected_contract["symbol"],
+                        selected_contract["token"],
+                    )
+
+                    st.metric(
+                        "Live Option LTP",
+                        f"₹{quote.ltp:,.2f}",
+                    )
+
+                    st.caption(
+                        f"Contract: {selected_contract['symbol']} "
+                        f"| Token: {selected_contract['token']}"
+                    )
+
+                except Exception as exc:
+                    st.error(f"Live option quote failed: {exc}")
     else:
         st.warning("No matching NIFTY 50 stock options found.")
 
