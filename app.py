@@ -118,7 +118,92 @@ if st.session_state.angel is not None:
             "This is a broker quote, not a buy/sell recommendation."
         )
 
+# ==========================================
+# HISTORICAL CANDLE DATA - READ ONLY
+# ==========================================
 
+st.divider()
+st.header("Historical Market Candles")
+
+if st.session_state.angel is not None:
+
+    candle_exchange = st.selectbox(
+        "Candle exchange",
+        ["NSE", "NFO", "BSE", "BFO", "MCX"],
+        key="candle_exchange",
+    )
+
+    candle_token = st.text_input(
+        "Candle instrument token",
+        "99926000",
+        key="candle_token",
+    )
+
+    candle_interval = st.selectbox(
+        "Candle interval",
+        [
+            "ONE_MINUTE",
+            "THREE_MINUTE",
+            "FIVE_MINUTE",
+            "TEN_MINUTE",
+            "FIFTEEN_MINUTE",
+            "THIRTY_MINUTE",
+            "ONE_HOUR",
+            "ONE_DAY",
+        ],
+        index=2,
+    )
+
+    from_date = st.text_input(
+        "From date (YYYY-MM-DD HH:MM)",
+        "2026-11-03 09:15",
+    )
+
+    to_date = st.text_input(
+        "To date (YYYY-MM-DD HH:MM)",
+        "2026-11-03 15:30",
+    )
+
+    if st.button("Fetch historical candles"):
+        try:
+            candles = st.session_state.angel.get_historical_candles(
+                exchange=candle_exchange,
+                token=candle_token.strip(),
+                fromdate=from_date.strip(),
+                todate=to_date.strip(),
+                interval=candle_interval,
+            )
+
+            if candles:
+                import pandas as pd
+
+                candle_df = pd.DataFrame(
+                    [
+                        {
+                            "Time": candle.timestamp,
+                            "Open": candle.open,
+                            "High": candle.high,
+                            "Low": candle.low,
+                            "Close": candle.close,
+                            "Volume": candle.volume,
+                        }
+                        for candle in candles
+                    ]
+                )
+
+                st.success(
+                    f"Received {len(candles)} historical candles."
+                )
+                st.dataframe(candle_df, use_container_width=True)
+
+            else:
+                st.warning("Angel One returned no candles.")
+
+        except Exception as exc:
+            st.error(f"Historical candle request failed: {exc}")
+
+else:
+    st.info("Connect Angel One to fetch historical candles.")
 # ==========================================
 # PAPER TRADING / DEMO DASHBOARD
 # ==========================================
