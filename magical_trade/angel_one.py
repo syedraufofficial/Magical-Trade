@@ -5,7 +5,7 @@
 
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from magical_trade.market_data import (
     parse_smartapi_quote,
@@ -227,16 +227,7 @@ class AngelOneAdapter:
         if not self.connected or self.client is None:
             raise RuntimeError("Connect to Angel One first.")
 
-        intervals = {
-            "ONE_MINUTE": 30,
-            "THREE_MINUTE": 60,
-            "FIVE_MINUTE": 100,
-            "TEN_MINUTE": 100,
-            "FIFTEEN_MINUTE": 200,
-            "THIRTY_MINUTE": 200,
-            "ONE_HOUR": 400,
-            "ONE_DAY": 2000,
-        }
+       
 
         exchange = str(exchange).upper()
         interval = str(interval).upper()
@@ -244,7 +235,12 @@ class AngelOneAdapter:
         if exchange not in {"NSE", "NFO", "BSE", "BFO", "MCX"}:
             raise ValueError("Unsupported exchange.")
 
-        if interval not in intervals:
+
+if interval not in {
+    "ONE_MINUTE", "THREE_MINUTE", "FIVE_MINUTE",
+    "TEN_MINUTE", "FIFTEEN_MINUTE", "THIRTY_MINUTE",
+    "ONE_HOUR", "ONE_DAY"
+}:
             raise ValueError("Unsupported candle interval.")
 
         if not token:
