@@ -1,10 +1,16 @@
 
 """Read-only Angel One SmartAPI adapter with diagnostics."""
 
+
+
 import os
 import logging
+from datetime import datetime, timedelta
 
-from magical_trade.market_data import parse_smartapi_quote
+from magical_trade.market_data import (
+    parse_smartapi_quote,
+    parse_smartapi_candles,
+)
 
 logger = logging.getLogger(__name__)
 
