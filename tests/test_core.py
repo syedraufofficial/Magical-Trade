@@ -88,3 +88,62 @@ def test_live_trading_is_disabled():
 
     with pytest.raises(LiveTradingDisabled):
         guard.submit("NIFTY", "BUY", 1)
+
+from magical_trade.market_data import parse_smartapi_quote
+
+
+def test_market_quote_parses_valid_data():
+    payload = {
+        "data": {
+            "fetched": [{
+                "tradingSymbol": "NIFTY",
+                "symbolToken": "99926000",
+                "ltp": 22500.5,
+                "open": 22400,
+                "high": 22600,
+                "low": 22350,
+                "close": 22450,
+                "volume": 100000,
+            }]
+        }
+    }
+
+    quote = parse_smartapi_quote(payload, "NIFTY")
+
+    assert quote.symbol == "NIFTY"
+    assert quote.ltp == 22500.5
+    assert quote.volume == 100000
+
+
+def test_market_quote_rejects_zero_ltp():
+    payload = {
+        "tradingSymbol": "NIFTY",
+        "ltp": 0,
+    }
+
+    with pytest.raises(ValueError):
+        parse_smartapi_quote(payload, "NIFTY")
+
+
+def test_market_quote_rejects_wrong_symbol():
+    payload = {
+        "tradingSymbol": "BANKNIFTY",
+        "ltp": 50000,
+    }
+
+    with pytest.raises(ValueError):
+        parse_smartapi_quote(payload, "NIFTY")
+
+
+def test_market_quote_rejects_multiple_records():
+    payload = {
+        "data": {
+            "fetched": [
+                {"tradingSymbol": "NIFTY", "ltp": 22500},
+                {"tradingSymbol": "BANKNIFTY", "ltp": 50000},
+            ]
+        }
+    }
+
+    with pytest.raises(ValueError):
+        parse_smartapi_quote(payload)
