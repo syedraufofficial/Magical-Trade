@@ -6,7 +6,13 @@ from magical_trade.models import MarketSnapshot
 from magical_trade.decision import evaluate
 from magical_trade.paper import PaperBroker
 from magical_trade.angel_one import AngelOneAdapter
-
+from magical_trade.instruments import (
+    load_instrument_master,
+    filter_nifty50_stock_options,
+)
+from magical_trade.nifty50_universe import (
+    load_nifty50_symbols,
+)
 
 st.set_page_config(page_title="Magical Trade", layout="wide")
 
