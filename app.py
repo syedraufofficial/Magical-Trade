@@ -300,10 +300,6 @@ if "nifty50_symbols" in st.session_state:
     else:
         st.warning("No matching NIFTY 50 stock options found.")
 
-st.dataframe(
-    selected_options,
-    use_container_width=True,
-)
 
 # ==========================================
 # PAPER TRADING / DEMO DASHBOARD
