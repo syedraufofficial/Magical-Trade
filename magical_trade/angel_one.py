@@ -235,12 +235,11 @@ class AngelOneAdapter:
         if exchange not in {"NSE", "NFO", "BSE", "BFO", "MCX"}:
             raise ValueError("Unsupported exchange.")
 
-
-if interval not in {
-    "ONE_MINUTE", "THREE_MINUTE", "FIVE_MINUTE",
-    "TEN_MINUTE", "FIFTEEN_MINUTE", "THIRTY_MINUTE",
-    "ONE_HOUR", "ONE_DAY"
-}:
+        if interval not in {
+            "ONE_MINUTE", "THREE_MINUTE", "FIVE_MINUTE",
+            "TEN_MINUTE", "FIFTEEN_MINUTE", "THIRTY_MINUTE",
+            "ONE_HOUR", "ONE_DAY"
+        }:
             raise ValueError("Unsupported candle interval.")
 
         if not token:
