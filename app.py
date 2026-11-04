@@ -9,6 +9,7 @@ from magical_trade.angel_one import AngelOneAdapter
 from magical_trade.instruments import (
     load_instrument_master,
     filter_nifty50_stock_options,
+    find_instrument,
 )
 from magical_trade.nifty50_universe import (
     load_nifty50_symbols,
