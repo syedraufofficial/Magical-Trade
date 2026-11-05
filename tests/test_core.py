@@ -1,10 +1,41 @@
+
 import pytest
 
-from magical_trade.models import MarketSnapshot, Signal, Side, Trade
+from magical_trade.models import (
+    MarketSnapshot,
+    Signal,
+    Side,
+    Trade,
+)
 from magical_trade.decision import evaluate
-from magical_trade.risk import RiskManager
+from magical_trade.risk import (
+    RiskManager,
+    BotRiskAccount,
+    BotRiskPolicy,
+)
 from magical_trade.paper import PaperBroker
-from magical_trade.live_guard import LiveExecutionGuard, LiveTradingDisabled
+from magical_trade.live_guard import (
+    LiveExecutionGuard,
+    LiveTradingDisabled,
+)
+from magical_trade.market_data import parse_smartapi_quote
+
+
+def make_trade(
+    quantity=1,
+    entry=100,
+    stop=99,
+    target=102,
+):
+    return Trade(
+        symbol="NIFTY",
+        side=Side.BUY,
+        quantity=quantity,
+        entry=entry,
+        stop_loss=stop,
+        target=target,
+        risk_amount=abs(entry - stop) * quantity,
+    )
 
 
 def test_bullish_signal_is_generated():
@@ -63,22 +94,124 @@ def test_risk_manager_rejects_excessive_risk():
 
 
 def test_paper_broker_executes_trade():
-    trade = Trade(
-        symbol="NIFTY",
-        side=Side.BUY,
-        quantity=1,
-        entry=100,
-        stop_loss=99,
-        target=102,
-        risk_amount=1,
-    )
-
     broker = PaperBroker(initial_capital=5000)
-    result = broker.execute(trade)
+    result = broker.execute(make_trade())
 
     assert result["symbol"] == "NIFTY"
     assert result["side"] == "BUY"
     assert broker.cash < 5000
+    assert result["status"] == "OPEN"
+
+
+def test_paper_broker_rejects_invalid_risk_reward():
+    broker = PaperBroker(initial_capital=5000)
+
+    with pytest.raises(ValueError, match="2:1"):
+        broker.execute(
+            make_trade(entry=100, stop=99, target=101)
+        )
+
+
+def test_paper_broker_rejects_invalid_buy_stop():
+    broker = PaperBroker(initial_capital=5000)
+
+    with pytest.raises(ValueError):
+        broker.execute(
+            make_trade(entry=100, stop=101, target=103)
+        )
+
+
+def test_per_bot_risk_rejects_risk_above_one_percent():
+    account = BotRiskAccount(
+        bot_id="bot-a",
+        allocated_capital=5000,
+    )
+    broker = PaperBroker(
+        initial_capital=5000,
+        risk_account=account,
+        bot_id="bot-a",
+    )
+
+    # 50 units of price risk plus entry slippage exceeds ₹50.
+    with pytest.raises(ValueError, match="risk budget"):
+        broker.execute(
+            make_trade(quantity=48)
+        )
+
+
+def test_per_bot_risk_allows_only_one_open_position():
+    account = BotRiskAccount(
+        bot_id="bot-a",
+        allocated_capital=5000,
+        policy=BotRiskPolicy(max_open_positions=1),
+    )
+    broker = PaperBroker(
+        initial_capital=5000,
+        risk_account=account,
+        bot_id="bot-a",
+    )
+
+    broker.execute(make_trade())
+
+    with pytest.raises(ValueError, match="Maximum open positions"):
+        broker.execute(make_trade())
+
+
+def test_paper_broker_rejects_mismatched_bot_account():
+    account = BotRiskAccount(
+        bot_id="bot-a",
+        allocated_capital=5000,
+    )
+
+    with pytest.raises(ValueError, match="another bot"):
+        PaperBroker(
+            initial_capital=5000,
+            risk_account=account,
+            bot_id="bot-b",
+        )
+
+
+def test_daily_loss_limit_blocks_next_trade():
+    account = BotRiskAccount(
+        bot_id="bot-a",
+        allocated_capital=1000,
+    )
+    broker = PaperBroker(
+        initial_capital=1000,
+        risk_account=account,
+        bot_id="bot-a",
+        slippage_bps=0,
+    )
+
+    result = broker.execute(make_trade(quantity=9))
+    broker.close_position(
+        result["position_id"],
+        market_price=80,
+        reason="TEST_LOSS",
+    )
+
+    assert account.daily_limit_reached
+
+    with pytest.raises(ValueError, match="Daily loss limit"):
+        broker.execute(make_trade())
+
+
+def test_paper_position_close_records_net_pnl():
+    broker = PaperBroker(
+        initial_capital=5000,
+        brokerage_per_order=5,
+        slippage_bps=0,
+    )
+    opened = broker.execute(make_trade())
+    closed = broker.close_position(
+        opened["position_id"],
+        market_price=102,
+        reason="TEST_TARGET",
+    )
+
+    assert closed["status"] == "CLOSED"
+    assert closed["fees"] == 10
+    assert closed["net_pnl"] == 2
 
 
 def test_live_trading_is_disabled():
@@ -88,8 +221,6 @@ def test_live_trading_is_disabled():
 
     with pytest.raises(LiveTradingDisabled):
         guard.submit("NIFTY", "BUY", 1)
-
-from magical_trade.market_data import parse_smartapi_quote
 
 
 def test_market_quote_parses_valid_data():
