@@ -1,5 +1,5 @@
 
-"""Long-only paper broker with per-bot risk enforcement."""
+"""Long-only paper broker with mandatory per-bot risk enforcement."""
 
 from dataclasses import dataclass, field
 from typing import Dict
@@ -7,6 +7,7 @@ from uuid import uuid4
 import math
 
 from .models import Trade, Side
+from .risk import BotRiskAccount, BotRiskPolicy
 
 
 @dataclass
@@ -44,8 +45,20 @@ class PaperBroker:
             self.slippage_bps,
         )
 
-        if not all(math.isfinite(float(v)) for v in values):
+        try:
+            valid_values = all(
+                math.isfinite(float(value))
+                for value in values
+            )
+        except (TypeError, ValueError):
+            valid_values = False
+
+        if not valid_values:
             raise ValueError("Paper account values must be finite")
+
+        self.initial_capital = float(self.initial_capital)
+        self.brokerage_per_order = float(self.brokerage_per_order)
+        self.slippage_bps = float(self.slippage_bps)
 
         if (
             self.initial_capital <= 0
@@ -58,48 +71,68 @@ class PaperBroker:
         if not isinstance(self.bot_id, str) or not self.bot_id.strip():
             raise ValueError("Bot ID is required")
 
-        if self.risk_account is not None:
-            if self.risk_account.bot_id != self.bot_id:
-                raise ValueError("Risk account belongs to another bot")
+        # Never allow a paper broker to operate without risk controls.
+        if self.risk_account is None:
+            self.risk_account = BotRiskAccount(
+                bot_id=self.bot_id,
+                allocated_capital=self.initial_capital,
+                policy=BotRiskPolicy(),
+            )
 
-            if self.risk_account.allocated_capital != self.initial_capital:
-                raise ValueError("Paper capital must match bot allocation")
+        if not isinstance(self.risk_account, BotRiskAccount):
+            raise TypeError("A valid BotRiskAccount is required")
 
-        self.cash = float(self.initial_capital)
+        if self.risk_account.bot_id != self.bot_id:
+            raise ValueError("Risk account belongs to another bot")
+
+        if (
+            self.risk_account.allocated_capital
+            != self.initial_capital
+        ):
+            raise ValueError("Paper capital must match bot allocation")
+
+        if self.risk_account.status.value != "ACTIVE":
+            raise ValueError("Paper bot is not active")
+
+        self.cash = self.initial_capital
 
     def _slipped_price(self, price: float, side: Side) -> float:
-        price = float(price)
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            raise ValueError("Price must be numeric") from None
 
         if not math.isfinite(price) or price <= 0:
             raise ValueError("Price must be finite and positive")
 
         slip = price * self.slippage_bps / 10000.0
+
         return price + slip if side == Side.BUY else price - slip
 
     @property
     def used_capital(self) -> float:
         return sum(
-            p.entry_price * p.quantity
-            for p in self.positions.values()
-            if p.status == "OPEN"
+            position.entry_price * position.quantity
+            for position in self.positions.values()
+            if position.status == "OPEN"
         )
 
     @property
     def unrealized_pnl(self) -> float:
         return sum(
-            self._position_pnl(p)
-            for p in self.positions.values()
-            if p.status == "OPEN"
+            self._position_pnl(position)
+            for position in self.positions.values()
+            if position.status == "OPEN"
         )
 
     @property
     def risk_unrealized_pnl(self) -> float:
         return sum(
-            self._position_pnl(p)
-            - p.entry_fees
+            self._position_pnl(position)
+            - position.entry_fees
             - self.brokerage_per_order
-            for p in self.positions.values()
-            if p.status == "OPEN"
+            for position in self.positions.values()
+            if position.status == "OPEN"
         )
 
     @property
@@ -120,28 +153,40 @@ class PaperBroker:
         ):
             raise ValueError("Quantity must be a positive integer")
 
-        prices = (trade.entry, trade.stop_loss, trade.target)
-
-        if not all(
-            math.isfinite(float(p)) and float(p) > 0
-            for p in prices
-        ):
-            raise ValueError("Trade prices must be finite and positive")
-
         if not isinstance(trade.symbol, str) or not trade.symbol.strip():
             raise ValueError("Trade symbol is required")
 
-        if not trade.stop_loss < trade.entry < trade.target:
+        try:
+            prices = tuple(
+                float(price)
+                for price in (
+                    trade.entry,
+                    trade.stop_loss,
+                    trade.target,
+                )
+            )
+        except (TypeError, ValueError):
+            raise ValueError("Trade prices must be numeric") from None
+
+        if not all(
+            math.isfinite(price) and price > 0
+            for price in prices
+        ):
+            raise ValueError("Trade prices must be finite and positive")
+
+        entry, stop_loss, target = prices
+
+        if not stop_loss < entry < target:
             raise ValueError("BUY requires stop < entry < target")
 
-        risk_per_unit = trade.entry - trade.stop_loss
-        reward_per_unit = trade.target - trade.entry
+        risk_per_unit = entry - stop_loss
+        reward_per_unit = target - entry
         risk_reward = reward_per_unit / risk_per_unit
 
-        if risk_reward < 2.0:
-            raise ValueError("Minimum risk/reward must be 2:1")
+        if risk_reward < self.risk_account.policy.min_risk_reward:
+            raise ValueError("Minimum risk/reward is 2:1")
 
-        fill = self._slipped_price(trade.entry, Side.BUY)
+        fill = self._slipped_price(entry, Side.BUY)
         fee = self.brokerage_per_order
         required = fill * trade.quantity + fee
 
@@ -149,22 +194,23 @@ class PaperBroker:
             raise ValueError("Insufficient paper cash")
 
         estimated_exit = self._slipped_price(
-            trade.stop_loss,
+            stop_loss,
             Side.SELL,
         )
+
         planned_risk = (
             (fill - estimated_exit) * trade.quantity
             + fee
             + self.brokerage_per_order
         )
 
-        if self.risk_account is not None:
-            allowed, reason = self.risk_account.can_open(
-                planned_risk,
-                risk_reward,
-            )
-            if not allowed:
-                raise ValueError(reason)
+        allowed, reason = self.risk_account.can_open(
+            planned_risk,
+            risk_reward,
+        )
+
+        if not allowed:
+            raise ValueError(reason)
 
         position_id = str(uuid4())
 
@@ -174,20 +220,21 @@ class PaperBroker:
             side=Side.BUY,
             quantity=trade.quantity,
             entry_price=fill,
-            stop_loss=trade.stop_loss,
-            target=trade.target,
+            stop_loss=stop_loss,
+            target=target,
             entry_fees=fee,
             current_price=fill,
             bot_id=self.bot_id,
         )
 
-        if self.risk_account is not None:
-            allowed, reason = self.risk_account.record_open(
-                planned_risk,
-                risk_reward,
-            )
-            if not allowed:
-                raise ValueError(reason)
+        # Register risk before changing cash or creating the position.
+        allowed, reason = self.risk_account.record_open(
+            planned_risk,
+            risk_reward,
+        )
+
+        if not allowed:
+            raise ValueError(reason)
 
         self.cash -= required
         self.positions[position_id] = position
@@ -206,6 +253,7 @@ class PaperBroker:
         }
 
         self.trades.append(record)
+
         return record
 
     def update_price(self, position_id: str, market_price: float):
@@ -214,32 +262,40 @@ class PaperBroker:
         if position is None or position.status != "OPEN":
             raise ValueError("Open paper position not found")
 
-        market_price = float(market_price)
+        try:
+            market_price = float(market_price)
+        except (TypeError, ValueError):
+            raise ValueError("Market price must be numeric") from None
 
         if not math.isfinite(market_price) or market_price <= 0:
             raise ValueError("Market price must be finite and positive")
 
         position.current_price = market_price
 
-        if self.risk_account is not None:
-            self.risk_account.update_unrealized_pnl(
-                self.risk_unrealized_pnl
-            )
+        self.risk_account.update_unrealized_pnl(
+            self.risk_unrealized_pnl
+        )
 
         return {
             "position_id": position_id,
             "unrealized_pnl": self._position_pnl(position),
             "status": position.status,
+            "daily_loss_limit_reached": (
+                self.risk_account.daily_limit_reached
+            ),
         }
 
     def monitor_positions(self, market_prices: dict):
-        """Update prices and automatically close triggered paper positions.
+        """Mark positions and close paper stops/targets at observed prices.
 
-        market_prices maps each instrument symbol to its latest observed price.
-        This method must be called repeatedly by the paper-trading runner.
+        The caller must supply validated, fresh market prices.
+        This method does not itself establish quote freshness.
         """
+
         if not isinstance(market_prices, dict):
-            raise TypeError("Market prices must be a symbol-to-price dictionary")
+            raise TypeError(
+                "Market prices must be a symbol-to-price dictionary"
+            )
 
         validated_prices = {}
 
@@ -247,29 +303,34 @@ class PaperBroker:
             if not isinstance(symbol, str) or not symbol.strip():
                 raise ValueError("Invalid market price symbol")
 
-            price = float(price)
+            try:
+                price = float(price)
+            except (TypeError, ValueError):
+                raise ValueError("Market prices must be numeric") from None
 
             if not math.isfinite(price) or price <= 0:
-                raise ValueError("Market prices must be finite and positive")
+                raise ValueError(
+                    "Market prices must be finite and positive"
+                )
 
             validated_prices[symbol] = price
 
-        # First mark every matching open position to market.
+        updated_count = 0
+
         for position in self.positions.values():
             if (
                 position.status == "OPEN"
                 and position.symbol in validated_prices
             ):
                 position.current_price = validated_prices[position.symbol]
+                updated_count += 1
 
-        if self.risk_account is not None:
-            self.risk_account.update_unrealized_pnl(
-                self.risk_unrealized_pnl
-            )
+        self.risk_account.update_unrealized_pnl(
+            self.risk_unrealized_pnl
+        )
 
         closed = []
 
-        # Then close triggered positions using the observed market price.
         for position in list(self.positions.values()):
             if position.status != "OPEN":
                 continue
@@ -296,15 +357,15 @@ class PaperBroker:
                 closed.append(result)
 
         return {
-            "updated_positions": sum(
-                1
-                for p in self.positions.values()
-                if p.symbol in validated_prices
-            ),
+            "updated_positions": updated_count,
             "closed_positions": closed,
             "remaining_open_positions": sum(
-                1 for p in self.positions.values()
-                if p.status == "OPEN"
+                1
+                for position in self.positions.values()
+                if position.status == "OPEN"
+            ),
+            "daily_loss_limit_reached": (
+                self.risk_account.daily_limit_reached
             ),
         }
 
@@ -324,6 +385,9 @@ class PaperBroker:
         if position is None or position.status != "OPEN":
             raise ValueError("Open paper position not found")
 
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("Close reason is required")
+
         exit_fill = self._slipped_price(market_price, Side.SELL)
         exit_fee = self.brokerage_per_order
 
@@ -333,12 +397,30 @@ class PaperBroker:
 
         net_pnl = gross_pnl - position.entry_fees - exit_fee
 
-        self.cash += (
-            position.entry_price * position.quantity
+        new_cash = (
+            self.cash
+            + position.entry_price * position.quantity
             + gross_pnl
             - exit_fee
         )
 
+        if not math.isfinite(new_cash):
+            raise ValueError("Invalid paper cash calculation")
+
+        remaining_unrealized = (
+            self.risk_unrealized_pnl
+            - self._position_pnl(position)
+            + position.entry_fees
+            + self.brokerage_per_order
+        )
+
+        # Validate and update risk accounting before finalizing the close.
+        self.risk_account.record_close(
+            net_pnl,
+            remaining_unrealized_pnl=remaining_unrealized,
+        )
+
+        self.cash = new_cash
         position.current_price = exit_fill
         position.status = "CLOSED"
 
@@ -359,10 +441,12 @@ class PaperBroker:
 
         self.closed_positions.append(result)
 
-        if self.risk_account is not None:
-            self.risk_account.record_close(
-                net_pnl,
-                remaining_unrealized_pnl=self.risk_unrealized_pnl,
-            )
+        for record in self.trades:
+            if record["position_id"] == position_id:
+                record["status"] = "CLOSED"
+                record["exit_price"] = exit_fill
+                record["net_pnl"] = net_pnl
+                record["reason"] = reason
+                break
 
         return result
