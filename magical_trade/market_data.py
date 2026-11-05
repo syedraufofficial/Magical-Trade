@@ -1,13 +1,9 @@
-
 """Magical Trade market data validation and parsing."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
-
-# ==========================================
-# NUMERIC VALIDATION
-# ==========================================
 
 def safe_number(value: Any, field: str, allow_zero=True) -> float:
     try:
@@ -23,10 +19,6 @@ def safe_number(value: Any, field: str, allow_zero=True) -> float:
 
     return number
 
-
-# ==========================================
-# LIVE MARKET QUOTE
-# ==========================================
 
 @dataclass(frozen=True)
 class MarketQuote:
@@ -45,17 +37,11 @@ def parse_smartapi_quote(
     payload: dict,
     requested_symbol: str | None = None,
 ) -> MarketQuote:
-
     if not isinstance(payload, dict):
         raise ValueError("Quote payload must be an object")
 
     data = payload.get("data")
-
-    records = (
-        data.get("fetched")
-        if isinstance(data, dict)
-        else None
-    )
+    records = data.get("fetched") if isinstance(data, dict) else None
 
     if records is not None:
         if not isinstance(records, list) or len(records) != 1:
@@ -86,9 +72,7 @@ def parse_smartapi_quote(
     if requested_symbol and symbol.upper() != requested_symbol.upper():
         raise ValueError("Requested and returned symbols differ")
 
-    volume = safe_number(
-        record.get("volume", 0), "volume"
-    )
+    volume = safe_number(record.get("volume", 0), "volume")
 
     if not volume.is_integer():
         raise ValueError("Volume must be a whole number")
@@ -120,9 +104,44 @@ def parse_smartapi_quote(
     )
 
 
-# ==========================================
-# HISTORICAL CANDLE MODEL
-# ==========================================
+def validate_quote_freshness(
+    quote: MarketQuote,
+    now: datetime | None = None,
+    max_age_seconds: int = 5,
+) -> tuple[bool, str]:
+    """Fail closed if exchange timestamp is missing, invalid or stale."""
+
+    if max_age_seconds < 0:
+        return False, "Invalid maximum data age"
+
+    if not quote.exchange_time:
+        return False, "Exchange timestamp unavailable"
+
+    try:
+        timestamp = datetime.fromisoformat(
+            quote.exchange_time.replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return False, "Invalid exchange timestamp"
+
+    if timestamp.tzinfo is None:
+        return False, "Exchange timestamp must include timezone"
+
+    now = now or datetime.now(timezone.utc)
+
+    if now.tzinfo is None:
+        return False, "Current time must include timezone"
+
+    age = (now - timestamp).total_seconds()
+
+    if age < -1:
+        return False, "Exchange timestamp is future-dated"
+
+    if age > max_age_seconds:
+        return False, f"Market data stale: {age:.1f} seconds old"
+
+    return True, "Market data timestamp is fresh"
+
 
 @dataclass(frozen=True)
 class MarketCandle:
@@ -134,12 +153,7 @@ class MarketCandle:
     volume: int
 
 
-# ==========================================
-# SMARTAPI HISTORICAL CANDLE PARSER
-# ==========================================
-
 def parse_smartapi_candles(payload: dict) -> list[MarketCandle]:
-
     if not isinstance(payload, dict):
         raise ValueError("Candle response must be an object")
 
@@ -150,11 +164,7 @@ def parse_smartapi_candles(payload: dict) -> list[MarketCandle]:
         )
 
     data = payload.get("data")
-
-    if isinstance(data, dict):
-        records = data.get("candles")
-    else:
-        records = data
+    records = data.get("candles") if isinstance(data, dict) else data
 
     if not isinstance(records, list):
         raise ValueError("Historical candle data is missing")
@@ -162,15 +172,12 @@ def parse_smartapi_candles(payload: dict) -> list[MarketCandle]:
     candles = []
 
     for index, row in enumerate(records):
-
         if not isinstance(row, (list, tuple)) or len(row) < 6:
-            raise ValueError(
-                f"Invalid candle record at index {index}"
-            )
+            raise ValueError(f"Invalid candle record at index {index}")
 
-        timestamp = str(row[0])
+        timestamp = str(row[0]).strip()
 
-        if not timestamp.strip():
+        if not timestamp:
             raise ValueError("Candle timestamp is missing")
 
         open_price = safe_number(row[1], "open", False)
