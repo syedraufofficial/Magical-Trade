@@ -132,11 +132,8 @@ def test_per_bot_risk_rejects_risk_above_one_percent():
         bot_id="bot-a",
     )
 
-    # 50 units of price risk plus entry slippage exceeds ₹50.
     with pytest.raises(ValueError, match="risk budget"):
-        broker.execute(
-            make_trade(quantity=48)
-        )
+        broker.execute(make_trade(quantity=48))
 
 
 def test_per_bot_risk_allows_only_one_open_position():
@@ -211,7 +208,59 @@ def test_paper_position_close_records_net_pnl():
 
     assert closed["status"] == "CLOSED"
     assert closed["fees"] == 10
-    assert closed["net_pnl"] == 2
+    assert closed["gross_pnl"] == 2
+    assert closed["net_pnl"] == -8
+
+
+def test_monitor_positions_closes_at_target():
+    broker = PaperBroker(
+        initial_capital=5000,
+        slippage_bps=0,
+    )
+    opened = broker.execute(make_trade())
+
+    result = broker.monitor_positions({"NIFTY": 102})
+
+    assert len(result["closed_positions"]) == 1
+    assert result["closed_positions"][0]["position_id"] == opened["position_id"]
+    assert result["closed_positions"][0]["reason"] == "TARGET"
+    assert result["remaining_open_positions"] == 0
+
+
+def test_monitor_positions_closes_at_stop_loss():
+    broker = PaperBroker(
+        initial_capital=5000,
+        slippage_bps=0,
+    )
+    opened = broker.execute(make_trade())
+
+    result = broker.monitor_positions({"NIFTY": 99})
+
+    assert len(result["closed_positions"]) == 1
+    assert result["closed_positions"][0]["position_id"] == opened["position_id"]
+    assert result["closed_positions"][0]["reason"] == "STOP_LOSS"
+    assert result["remaining_open_positions"] == 0
+
+
+def test_monitor_positions_keeps_position_between_levels():
+    broker = PaperBroker(
+        initial_capital=5000,
+        slippage_bps=0,
+    )
+    broker.execute(make_trade())
+
+    result = broker.monitor_positions({"NIFTY": 100.5})
+
+    assert result["closed_positions"] == []
+    assert result["remaining_open_positions"] == 1
+
+
+def test_monitor_positions_rejects_invalid_price():
+    broker = PaperBroker(initial_capital=5000)
+    broker.execute(make_trade())
+
+    with pytest.raises(ValueError):
+        broker.monitor_positions({"NIFTY": 0})
 
 
 def test_live_trading_is_disabled():
