@@ -1,5 +1,5 @@
 
-"""Paper broker with optional per-bot risk enforcement."""
+"""Long-only paper broker with per-bot risk enforcement."""
 
 from dataclasses import dataclass, field
 from typing import Dict
@@ -38,29 +38,38 @@ class PaperBroker:
     closed_positions: list = field(default_factory=list)
 
     def __post_init__(self):
+        values = (
+            self.initial_capital,
+            self.brokerage_per_order,
+            self.slippage_bps,
+        )
+
+        if not all(math.isfinite(float(v)) for v in values):
+            raise ValueError("Paper account values must be finite")
+
         if (
-            not math.isfinite(self.initial_capital)
-            or not math.isfinite(self.brokerage_per_order)
-            or not math.isfinite(self.slippage_bps)
-            or self.initial_capital <= 0
+            self.initial_capital <= 0
             or self.brokerage_per_order < 0
             or self.slippage_bps < 0
             or self.slippage_bps >= 10000
         ):
             raise ValueError("Invalid paper account configuration")
 
-        if not self.bot_id:
+        if not isinstance(self.bot_id, str) or not self.bot_id.strip():
             raise ValueError("Bot ID is required")
 
         if self.risk_account is not None:
             if self.risk_account.bot_id != self.bot_id:
                 raise ValueError("Risk account belongs to another bot")
+
             if self.risk_account.allocated_capital != self.initial_capital:
                 raise ValueError("Paper capital must match bot allocation")
 
         self.cash = float(self.initial_capital)
 
     def _slipped_price(self, price: float, side: Side) -> float:
+        price = float(price)
+
         if not math.isfinite(price) or price <= 0:
             raise ValueError("Price must be finite and positive")
 
@@ -84,6 +93,17 @@ class PaperBroker:
         )
 
     @property
+    def risk_unrealized_pnl(self) -> float:
+        """Estimated net unrealized P&L including estimated exit fees."""
+        return sum(
+            self._position_pnl(p)
+            - p.entry_fees
+            - self.brokerage_per_order
+            for p in self.positions.values()
+            if p.status == "OPEN"
+        )
+
+    @property
     def equity(self) -> float:
         return self.cash + self.used_capital + self.unrealized_pnl
 
@@ -91,43 +111,54 @@ class PaperBroker:
         if not isinstance(trade, Trade):
             raise TypeError("Expected a Trade object")
 
-        if not isinstance(trade.side, Side):
-            raise ValueError("Invalid trade side")
+        # This broker supports buying options only, not opening shorts.
+        if trade.side != Side.BUY:
+            raise ValueError("Paper broker supports BUY positions only")
 
-        if not isinstance(trade.quantity, int) or trade.quantity <= 0:
+        if (
+            not isinstance(trade.quantity, int)
+            or isinstance(trade.quantity, bool)
+            or trade.quantity <= 0
+        ):
             raise ValueError("Quantity must be a positive integer")
 
         prices = (trade.entry, trade.stop_loss, trade.target)
-        if not all(math.isfinite(p) and p > 0 for p in prices):
+
+        if not all(
+            math.isfinite(float(p)) and float(p) > 0
+            for p in prices
+        ):
             raise ValueError("Trade prices must be finite and positive")
 
-        if not trade.symbol:
+        if not isinstance(trade.symbol, str) or not trade.symbol.strip():
             raise ValueError("Trade symbol is required")
 
-        if trade.side == Side.BUY:
-            if not trade.stop_loss < trade.entry < trade.target:
-                raise ValueError("BUY requires stop < entry < target")
-        else:
-            if not trade.target < trade.entry < trade.stop_loss:
-                raise ValueError("SELL requires target < entry < stop")
+        if not trade.stop_loss < trade.entry < trade.target:
+            raise ValueError("BUY requires stop < entry < target")
 
-        risk_per_unit = abs(trade.entry - trade.stop_loss)
-        reward_per_unit = abs(trade.target - trade.entry)
+        risk_per_unit = trade.entry - trade.stop_loss
+        reward_per_unit = trade.target - trade.entry
         risk_reward = reward_per_unit / risk_per_unit
 
         if risk_reward < 2.0:
             raise ValueError("Minimum risk/reward must be 2:1")
 
-        fill = self._slipped_price(trade.entry, trade.side)
+        fill = self._slipped_price(trade.entry, Side.BUY)
         fee = self.brokerage_per_order
         required = fill * trade.quantity + fee
 
         if required > self.cash:
             raise ValueError("Insufficient paper cash")
 
-        # Include entry slippage and fees in the risk budget.
+        # Include entry slippage and an estimated exit fee in risk.
+        estimated_exit = self._slipped_price(
+            trade.stop_loss,
+            Side.SELL,
+        )
         planned_risk = (
-            abs(fill - trade.stop_loss) * trade.quantity + fee
+            (fill - estimated_exit) * trade.quantity
+            + fee
+            + self.brokerage_per_order
         )
 
         if self.risk_account is not None:
@@ -143,7 +174,7 @@ class PaperBroker:
         position = PaperPosition(
             position_id=position_id,
             symbol=trade.symbol,
-            side=trade.side,
+            side=Side.BUY,
             quantity=trade.quantity,
             entry_price=fill,
             stop_loss=trade.stop_loss,
@@ -153,7 +184,6 @@ class PaperBroker:
             bot_id=self.bot_id,
         )
 
-        # Register risk only after all other entry checks pass.
         if self.risk_account is not None:
             allowed, reason = self.risk_account.record_open(
                 planned_risk,
@@ -169,7 +199,7 @@ class PaperBroker:
             "position_id": position_id,
             "bot_id": self.bot_id,
             "symbol": trade.symbol,
-            "side": trade.side.value,
+            "side": "BUY",
             "qty": trade.quantity,
             "fill": round(fill, 4),
             "fees": fee,
@@ -187,14 +217,16 @@ class PaperBroker:
         if position is None or position.status != "OPEN":
             raise ValueError("Open paper position not found")
 
+        market_price = float(market_price)
+
         if not math.isfinite(market_price) or market_price <= 0:
             raise ValueError("Market price must be finite and positive")
 
-        position.current_price = float(market_price)
+        position.current_price = market_price
 
         if self.risk_account is not None:
             self.risk_account.update_unrealized_pnl(
-                self.unrealized_pnl
+                self.risk_unrealized_pnl
             )
 
         return {
@@ -204,13 +236,8 @@ class PaperBroker:
         }
 
     def _position_pnl(self, position: PaperPosition) -> float:
-        if position.side == Side.BUY:
-            return (
-                position.current_price - position.entry_price
-            ) * position.quantity
-
         return (
-            position.entry_price - position.current_price
+            position.current_price - position.entry_price
         ) * position.quantity
 
     def close_position(
@@ -224,25 +251,19 @@ class PaperBroker:
         if position is None or position.status != "OPEN":
             raise ValueError("Open paper position not found")
 
-        if not math.isfinite(market_price) or market_price <= 0:
-            raise ValueError("Exit price must be finite and positive")
-
-        exit_side = (
-            Side.SELL if position.side == Side.BUY else Side.BUY
-        )
-        exit_fill = self._slipped_price(market_price, exit_side)
+        exit_fill = self._slipped_price(market_price, Side.SELL)
         exit_fee = self.brokerage_per_order
 
         gross_pnl = (
-            (exit_fill - position.entry_price) * position.quantity
-            if position.side == Side.BUY
-            else (position.entry_price - exit_fill) * position.quantity
-        )
+            exit_fill - position.entry_price
+        ) * position.quantity
 
         net_pnl = gross_pnl - position.entry_fees - exit_fee
 
         self.cash += (
-            position.entry_price * position.quantity + gross_pnl - exit_fee
+            position.entry_price * position.quantity
+            + gross_pnl
+            - exit_fee
         )
 
         position.current_price = exit_fill
@@ -252,7 +273,7 @@ class PaperBroker:
             "position_id": position_id,
             "bot_id": self.bot_id,
             "symbol": position.symbol,
-            "side": position.side.value,
+            "side": "BUY",
             "quantity": position.quantity,
             "entry_price": position.entry_price,
             "exit_price": exit_fill,
@@ -266,6 +287,9 @@ class PaperBroker:
         self.closed_positions.append(result)
 
         if self.risk_account is not None:
-            self.risk_account.record_close(net_pnl)
+            self.risk_account.record_close(
+                net_pnl,
+                remaining_unrealized_pnl=self.risk_unrealized_pnl,
+            )
 
         return result
