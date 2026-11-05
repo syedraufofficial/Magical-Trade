@@ -94,7 +94,6 @@ class PaperBroker:
 
     @property
     def risk_unrealized_pnl(self) -> float:
-        """Estimated net unrealized P&L including estimated exit fees."""
         return sum(
             self._position_pnl(p)
             - p.entry_fees
@@ -111,7 +110,6 @@ class PaperBroker:
         if not isinstance(trade, Trade):
             raise TypeError("Expected a Trade object")
 
-        # This broker supports buying options only, not opening shorts.
         if trade.side != Side.BUY:
             raise ValueError("Paper broker supports BUY positions only")
 
@@ -150,7 +148,6 @@ class PaperBroker:
         if required > self.cash:
             raise ValueError("Insufficient paper cash")
 
-        # Include entry slippage and an estimated exit fee in risk.
         estimated_exit = self._slipped_price(
             trade.stop_loss,
             Side.SELL,
@@ -233,6 +230,82 @@ class PaperBroker:
             "position_id": position_id,
             "unrealized_pnl": self._position_pnl(position),
             "status": position.status,
+        }
+
+    def monitor_positions(self, market_prices: dict):
+        """Update prices and automatically close triggered paper positions.
+
+        market_prices maps each instrument symbol to its latest observed price.
+        This method must be called repeatedly by the paper-trading runner.
+        """
+        if not isinstance(market_prices, dict):
+            raise TypeError("Market prices must be a symbol-to-price dictionary")
+
+        validated_prices = {}
+
+        for symbol, price in market_prices.items():
+            if not isinstance(symbol, str) or not symbol.strip():
+                raise ValueError("Invalid market price symbol")
+
+            price = float(price)
+
+            if not math.isfinite(price) or price <= 0:
+                raise ValueError("Market prices must be finite and positive")
+
+            validated_prices[symbol] = price
+
+        # First mark every matching open position to market.
+        for position in self.positions.values():
+            if (
+                position.status == "OPEN"
+                and position.symbol in validated_prices
+            ):
+                position.current_price = validated_prices[position.symbol]
+
+        if self.risk_account is not None:
+            self.risk_account.update_unrealized_pnl(
+                self.risk_unrealized_pnl
+            )
+
+        closed = []
+
+        # Then close triggered positions using the observed market price.
+        for position in list(self.positions.values()):
+            if position.status != "OPEN":
+                continue
+
+            if position.symbol not in validated_prices:
+                continue
+
+            price = validated_prices[position.symbol]
+
+            if price <= position.stop_loss:
+                result = self.close_position(
+                    position.position_id,
+                    price,
+                    reason="STOP_LOSS",
+                )
+                closed.append(result)
+
+            elif price >= position.target:
+                result = self.close_position(
+                    position.position_id,
+                    price,
+                    reason="TARGET",
+                )
+                closed.append(result)
+
+        return {
+            "updated_positions": sum(
+                1
+                for p in self.positions.values()
+                if p.symbol in validated_prices
+            ),
+            "closed_positions": closed,
+            "remaining_open_positions": sum(
+                1 for p in self.positions.values()
+                if p.status == "OPEN"
+            ),
         }
 
     def _position_pnl(self, position: PaperPosition) -> float:
