@@ -185,3 +185,24 @@ class BotRiskRegistry:
 
     def get(self, bot_id: str):
         return self.accounts.get(bot_id)
+
+class RiskManager:
+    """Backward-compatible trade sizing check."""
+
+    def __init__(self, max_risk_per_trade=50.0):
+        if max_risk_per_trade <= 0:
+            raise ValueError("Maximum risk must be positive")
+        self.max_risk_per_trade = float(max_risk_per_trade)
+
+    def size_trade(self, signal, quantity=1):
+        if quantity <= 0:
+            raise ValueError("Quantity must be positive")
+
+        risk_per_unit = abs(signal.entry - signal.stop_loss)
+        total_risk = risk_per_unit * quantity
+
+        if total_risk > self.max_risk_per_trade:
+            raise ValueError("Trade risk exceeds maximum allowed")
+
+        return quantity
+
